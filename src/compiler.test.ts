@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { compile, createFakeModelAdapter, zipBundle } from "@/compiler";
+import { check, compile, createFakeModelAdapter, zipBundle } from "@/compiler";
 import type { ModelAdapter, SkillSpec } from "@/compiler";
 
 const explodingAdapter: ModelAdapter = {
@@ -224,6 +224,16 @@ test("zipBundle zip contains Cursor and Claude Code Projections, INSTALL.md, and
   expect(JSON.parse(files["evals/cases.json"])).toEqual(prReviewEvalCases);
 });
 
+test("compile returns Lint for a complete portable Canon", async () => {
+  const result = await compilePrReview();
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected compile to return Lint");
+  }
+  expect(result.lint).toEqual({ ok: true, issues: [] });
+});
+
 function readStoredZip(zip: Uint8Array): Record<string, string> {
   const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
   const decoder = new TextDecoder();
@@ -418,4 +428,181 @@ test("Russian Description produces a Russian Skill Spec", async () => {
   for (const antiGoal of result.skillSpec.antiGoals) {
     expect(antiGoal).toMatch(cyrillic);
   }
+});
+
+test("Check shows Lint and Judge unavailable when the Judge cannot run", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = check(compiled.canon, compiled.bundle);
+
+  expect(result.lint.ok).toBe(true);
+  expect(result.lint.issues).toEqual([]);
+  expect(result.judge).toEqual({ status: "unavailable" });
+});
+
+test("Lint fails when Canon frontmatter is missing name", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = check(
+    {
+      ...compiled.canon,
+      markdown: compiled.canon.markdown.replace(/^name:.*\n/m, ""),
+    },
+    compiled.bundle,
+  );
+
+  expect(result.lint.ok).toBe(false);
+  expect(result.lint.issues).toContain("Canon frontmatter is missing name.");
+});
+
+test("Lint fails when Canon frontmatter is missing description", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = check(
+    {
+      ...compiled.canon,
+      markdown: compiled.canon.markdown.replace(/^description:.*\n/m, ""),
+    },
+    compiled.bundle,
+  );
+
+  expect(result.lint.ok).toBe(false);
+  expect(result.lint.issues).toContain(
+    "Canon frontmatter is missing description.",
+  );
+});
+
+test("Lint fails when Canon name does not match the Skill folder", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const folderName = "other-skill";
+  const result = check(
+    { ...compiled.canon, folderName },
+    {
+      files: {
+        [`cursor/${folderName}/SKILL.md`]: compiled.canon.markdown,
+        [`claude/${folderName}/SKILL.md`]: compiled.canon.markdown,
+        "INSTALL.md": compiled.bundle.files["INSTALL.md"],
+        "evals/cases.json": compiled.bundle.files["evals/cases.json"],
+      },
+    },
+  );
+
+  expect(result.lint.ok).toBe(false);
+  expect(result.lint.issues).toContain(
+    "Canon name does not match the Skill folder.",
+  );
+});
+
+test("Lint fails when the Canon uses non-portable fields", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = check(
+    {
+      ...compiled.canon,
+      markdown: compiled.canon.markdown.replace(
+        /^description:.*$/m,
+        `$&\nallowed-tools: Bash`,
+      ),
+    },
+    compiled.bundle,
+  );
+
+  expect(result.lint.ok).toBe(false);
+  expect(result.lint.issues).toContain(
+    "Canon uses non-portable field: allowed-tools.",
+  );
+});
+
+test("Lint fails when the Bundle is missing a Cursor Projection", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const files = { ...compiled.bundle.files };
+  delete files[`cursor/${compiled.canon.folderName}/SKILL.md`];
+  const result = check(compiled.canon, { files });
+
+  expect(result.lint.ok).toBe(false);
+  expect(result.lint.issues).toContain(
+    "Bundle is missing a Cursor Projection.",
+  );
+});
+
+test("Lint fails when the Bundle is missing a Claude Code Projection", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const files = { ...compiled.bundle.files };
+  delete files[`claude/${compiled.canon.folderName}/SKILL.md`];
+  const result = check(compiled.canon, { files });
+
+  expect(result.lint.ok).toBe(false);
+  expect(result.lint.issues).toContain(
+    "Bundle is missing a Claude Code Projection.",
+  );
+});
+
+test("Lint fails when the Bundle is missing INSTALL.md", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const files = { ...compiled.bundle.files };
+  delete files["INSTALL.md"];
+  const result = check(compiled.canon, { files });
+
+  expect(result.lint.ok).toBe(false);
+  expect(result.lint.issues).toContain("Bundle is missing INSTALL.md.");
+});
+
+test("Lint fails when the Bundle is missing evals/cases.json", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const files = { ...compiled.bundle.files };
+  delete files["evals/cases.json"];
+  const result = check(compiled.canon, { files });
+
+  expect(result.lint.ok).toBe(false);
+  expect(result.lint.issues).toContain("Bundle is missing evals/cases.json.");
 });

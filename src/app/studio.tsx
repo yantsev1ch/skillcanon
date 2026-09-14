@@ -3,9 +3,11 @@
 import { useActionState, useState } from "react";
 import { compileDescription } from "./actions";
 import {
+  check,
   zipBundle,
   type Bundle,
   type Canon,
+  type CheckResult,
   type CompatibilityReport,
   type CompileResult,
   type SkillSpec,
@@ -65,7 +67,7 @@ export function Studio() {
           <aside className="rounded-md border border-dashed border-[var(--rule)] bg-[var(--paper-raised)]/50 px-6 py-8 text-[var(--ink-soft)]">
             <p className="text-sm leading-6">
               Compile a Description to see the Skill Spec, then a Canon preview,
-              a Compatibility Report, and a Bundle zip.
+              a Compatibility Report, a Bundle zip, and Check.
             </p>
           </aside>
         )}
@@ -81,6 +83,9 @@ export function Studio() {
           bundle={result.bundle}
           folderName={result.canon.folderName}
         />
+      ) : null}
+      {result?.ok ? (
+        <CheckView checkResult={check(result.canon, result.bundle)} />
       ) : null}
     </div>
   );
@@ -258,6 +263,47 @@ function BundleView({
       >
         Download Bundle zip
       </button>
+    </article>
+  );
+}
+
+function CheckView({ checkResult }: { checkResult: CheckResult }) {
+  return (
+    <article
+      aria-labelledby="check-heading"
+      className="rounded-md border border-[var(--rule)] bg-[var(--paper-raised)] px-6 py-6 shadow-[0_10px_30px_rgba(28,25,21,0.06)]"
+    >
+      <h2
+        id="check-heading"
+        className="font-[family-name:var(--font-source-serif)] text-2xl text-[var(--ink)]"
+      >
+        Check
+      </h2>
+      <section className="mt-6" aria-labelledby="lint-heading">
+        <h3
+          id="lint-heading"
+          className="text-xs font-medium tracking-[0.14em] text-[var(--ink-soft)] uppercase"
+        >
+          Lint
+        </h3>
+        {checkResult.lint.ok ? (
+          <p className="mt-2 text-base leading-7 text-[var(--ink)]">
+            Lint passed.
+          </p>
+        ) : (
+          <ul className="mt-2 list-disc space-y-2 pl-5 text-base leading-7 text-[var(--error)]">
+            {checkResult.lint.issues.map((issue) => (
+              <li key={issue}>{issue}</li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <p
+        role="status"
+        className="mt-6 rounded-md border border-[var(--rule)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink-soft)]"
+      >
+        Judge {checkResult.judge.status}
+      </p>
     </article>
   );
 }

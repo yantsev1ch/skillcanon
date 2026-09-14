@@ -44,6 +44,20 @@ export type Bundle = {
   files: Record<string, string>;
 };
 
+export type Lint = {
+  ok: boolean;
+  issues: string[];
+};
+
+export type Judge = {
+  status: "unavailable";
+};
+
+export type CheckResult = {
+  lint: Lint;
+  judge: Judge;
+};
+
 export type CompileResult =
   | {
       ok: true;
@@ -51,8 +65,77 @@ export type CompileResult =
       canon: Canon;
       compatibilityReport: CompatibilityReport;
       bundle: Bundle;
+      lint: Lint;
     }
   | { ok: false; message: string };
+
+export function check(canon: Canon, bundle: Bundle): CheckResult {
+  return {
+    lint: lint(canon, bundle),
+    judge: { status: "unavailable" },
+  };
+}
+
+function lint(canon: Canon, bundle: Bundle): Lint {
+  const issues: string[] = [];
+  const frontmatter = parseFrontmatter(canon.markdown);
+
+  if (!frontmatter.name) {
+    issues.push("Canon frontmatter is missing name.");
+  }
+  if (!frontmatter.description) {
+    issues.push("Canon frontmatter is missing description.");
+  }
+  if (frontmatter.name && frontmatter.name !== canon.folderName) {
+    issues.push("Canon name does not match the Skill folder.");
+  }
+
+  const portableFields = new Set(["name", "description"]);
+  for (const field of Object.keys(frontmatter)) {
+    if (!portableFields.has(field)) {
+      issues.push(`Canon uses non-portable field: ${field}.`);
+    }
+  }
+
+  if (!bundle.files[`cursor/${canon.folderName}/SKILL.md`]) {
+    issues.push("Bundle is missing a Cursor Projection.");
+  }
+  if (!bundle.files[`claude/${canon.folderName}/SKILL.md`]) {
+    issues.push("Bundle is missing a Claude Code Projection.");
+  }
+  if (!bundle.files["INSTALL.md"]) {
+    issues.push("Bundle is missing INSTALL.md.");
+  }
+  if (!bundle.files["evals/cases.json"]) {
+    issues.push("Bundle is missing evals/cases.json.");
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
+function parseFrontmatter(markdown: string): Record<string, string> {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
+  if (!match) {
+    return {};
+  }
+
+  const fields: Record<string, string> = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, separator).trim();
+    let value = line.slice(separator + 1).trim();
+    if (value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1);
+    }
+    fields[key] = value;
+  }
+
+  return fields;
+}
 
 const compatibilityReport: CompatibilityReport = {
   fields: [
@@ -190,20 +273,22 @@ ${body}
     description: canonDescription,
     markdown,
   };
+  const bundle: Bundle = {
+    files: {
+      [`cursor/${canon.folderName}/SKILL.md`]: markdown,
+      [`claude/${canon.folderName}/SKILL.md`]: markdown,
+      "INSTALL.md": installMarkdown(canon.folderName),
+      "evals/cases.json": `${JSON.stringify(parsedEvalCases.data, null, 2)}\n`,
+    },
+  };
 
   return {
     ok: true,
     skillSpec,
     canon,
     compatibilityReport,
-    bundle: {
-      files: {
-        [`cursor/${canon.folderName}/SKILL.md`]: markdown,
-        [`claude/${canon.folderName}/SKILL.md`]: markdown,
-        "INSTALL.md": installMarkdown(canon.folderName),
-        "evals/cases.json": `${JSON.stringify(parsedEvalCases.data, null, 2)}\n`,
-      },
-    },
+    bundle,
+    lint: lint(canon, bundle),
   };
 }
 

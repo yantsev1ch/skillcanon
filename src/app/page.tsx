@@ -13,8 +13,8 @@ export default function Home() {
           </h1>
           <p className="max-w-2xl text-base leading-7 text-[var(--ink-soft)]">
             Type a Description. Compile a Skill Spec, then preview the portable
-            Canon, a Compatibility Report, and a Bundle zip for Cursor and
-            Claude Code.
+            Canon, a Compatibility Report, a Bundle zip for Cursor and Claude
+            Code, and Check.
           </p>
         </div>
       </header>
