@@ -15,7 +15,7 @@ const sourceSerif = Source_Serif_4({
 export const metadata: Metadata = {
   title: "Skillcanon",
   description:
-    "Turn a Description into a Skill Spec, a portable Canon, and a Compatibility Report.",
+    "Turn a Description into a Skill Spec, a portable Canon, a Compatibility Report, and a Bundle zip.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

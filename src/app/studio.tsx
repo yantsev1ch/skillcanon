@@ -2,11 +2,13 @@
 
 import { useActionState, useState } from "react";
 import { compileDescription } from "./actions";
-import type {
-  Canon,
-  CompatibilityReport,
-  CompileResult,
-  SkillSpec,
+import {
+  zipBundle,
+  type Bundle,
+  type Canon,
+  type CompatibilityReport,
+  type CompileResult,
+  type SkillSpec,
 } from "@/compiler";
 
 export function Studio() {
@@ -62,8 +64,8 @@ export function Studio() {
         ) : (
           <aside className="rounded-md border border-dashed border-[var(--rule)] bg-[var(--paper-raised)]/50 px-6 py-8 text-[var(--ink-soft)]">
             <p className="text-sm leading-6">
-              Compile a Description to see the Skill Spec, then a Canon preview
-              and a Compatibility Report for Cursor vs Claude Code.
+              Compile a Description to see the Skill Spec, then a Canon preview,
+              a Compatibility Report, and a Bundle zip.
             </p>
           </aside>
         )}
@@ -73,6 +75,12 @@ export function Studio() {
           <CanonView canon={result.canon} />
           <CompatibilityReportView report={result.compatibilityReport} />
         </div>
+      ) : null}
+      {result?.ok ? (
+        <BundleView
+          bundle={result.bundle}
+          folderName={result.canon.folderName}
+        />
       ) : null}
     </div>
   );
@@ -214,4 +222,57 @@ function VerdictBadge({ verdict }: { verdict: "honored" | "ignored" }) {
       Ignored
     </span>
   );
+}
+
+function BundleView({
+  bundle,
+  folderName,
+}: {
+  bundle: Bundle;
+  folderName: string;
+}) {
+  return (
+    <article
+      aria-labelledby="bundle-heading"
+      className="rounded-md border border-[var(--rule)] bg-[var(--paper-raised)] px-6 py-6 shadow-[0_10px_30px_rgba(28,25,21,0.06)]"
+    >
+      <h2
+        id="bundle-heading"
+        className="font-[family-name:var(--font-source-serif)] text-2xl text-[var(--ink)]"
+      >
+        Bundle
+      </h2>
+      <p className="mt-2 text-sm leading-6 text-[var(--ink-soft)]">
+        One zip with a Cursor Projection, a Claude Code Projection, INSTALL.md,
+        and evals/cases.json. Both Projections contain the same Canon bytes.
+      </p>
+      <ul className="mt-6 list-disc space-y-2 pl-5 font-mono text-sm leading-6 text-[var(--ink)]">
+        {Object.keys(bundle.files).map((path) => (
+          <li key={path}>{path}</li>
+        ))}
+      </ul>
+      <button
+        type="button"
+        onClick={() => downloadBundle(bundle, folderName)}
+        className="mt-6 inline-flex h-11 w-fit items-center justify-center rounded-md bg-[var(--pine)] px-5 text-sm font-semibold text-[var(--paper)] transition-colors hover:bg-[var(--pine-dark)]"
+      >
+        Download Bundle zip
+      </button>
+    </article>
+  );
+}
+
+function downloadBundle(bundle: Bundle, folderName: string) {
+  const zip = zipBundle(bundle);
+  const bytes = new Uint8Array(zip.byteLength);
+  bytes.set(zip);
+  const blob = new Blob([bytes], { type: "application/zip" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${folderName}-bundle.zip`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }

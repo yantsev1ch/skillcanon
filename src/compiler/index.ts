@@ -6,6 +6,10 @@ export type ModelAdapter = {
     description: string;
     skillSpec: SkillSpec;
   }) => Promise<unknown>;
+  generateEvalCases: (input: {
+    description: string;
+    skillSpec: SkillSpec;
+  }) => Promise<unknown>;
 };
 
 export type SkillSpec = {
@@ -34,12 +38,23 @@ export type CompatibilityReport = {
   fields: CompatibilityField[];
 };
 
+export type EvalCase = {
+  scenario: string;
+  must: string[];
+  mustNot: string[];
+};
+
+export type Bundle = {
+  files: Record<string, string>;
+};
+
 export type CompileResult =
   | {
       ok: true;
       skillSpec: SkillSpec;
       canon: Canon;
       compatibilityReport: CompatibilityReport;
+      bundle: Bundle;
     }
   | { ok: false; message: string };
 
@@ -108,6 +123,18 @@ const canonSchema = z
   })
   .strict();
 
+const evalCasesSchema = z
+  .array(
+    z
+      .object({
+        scenario: z.string().min(1),
+        must: z.array(z.string().min(1)).min(1),
+        mustNot: z.array(z.string().min(1)).min(1),
+      })
+      .strict(),
+  )
+  .min(1);
+
 export async function compile(
   description: string,
   adapter: ModelAdapter,
@@ -151,17 +178,126 @@ description: ${yamlDoubleQuoted(canonDescription)}
 ${body}
 `;
 
+  const evalCasesOutput = await adapter.generateEvalCases({
+    description: trimmed,
+    skillSpec,
+  });
+  const parsedEvalCases = evalCasesSchema.safeParse(evalCasesOutput);
+  if (!parsedEvalCases.success) {
+    return {
+      ok: false,
+      message: "The model returned malformed Eval Cases.",
+    };
+  }
+
+  const canon: Canon = {
+    name,
+    folderName: name,
+    description: canonDescription,
+    markdown,
+  };
+
   return {
     ok: true,
     skillSpec,
-    canon: {
-      name,
-      folderName: name,
-      description: canonDescription,
-      markdown,
-    },
+    canon,
     compatibilityReport,
+    bundle: {
+      files: {
+        [`cursor/${canon.folderName}/SKILL.md`]: markdown,
+        [`claude/${canon.folderName}/SKILL.md`]: markdown,
+        "INSTALL.md": installMarkdown(canon.folderName),
+        "evals/cases.json": `${JSON.stringify(parsedEvalCases.data, null, 2)}\n`,
+      },
+    },
   };
+}
+
+function installMarkdown(folderName: string): string {
+  return `# Install
+
+This Bundle has two Projections of the same Canon. Copy the folder for your runtime; path is the only difference.
+
+## Cursor
+
+Copy \`cursor/${folderName}/\` to \`.cursor/skills/${folderName}/\` in your project, or to \`~/.cursor/skills/${folderName}/\` for every project.
+
+## Claude Code
+
+Copy \`claude/${folderName}/\` to \`.claude/skills/${folderName}/\` in your project, or to \`~/.claude/skills/${folderName}/\` for every project.
+`;
+}
+
+const crcTable = Uint32Array.from({ length: 256 }, (_, index) => {
+  let crc = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return crc;
+});
+
+function crc32(data: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+export function zipBundle(bundle: Bundle): Uint8Array {
+  const encoder = new TextEncoder();
+  const locals: Uint8Array[] = [];
+  const centrals: Uint8Array[] = [];
+  let localOffset = 0;
+
+  for (const [name, content] of Object.entries(bundle.files)) {
+    const nameBytes = encoder.encode(name);
+    const data = encoder.encode(content);
+    const crc = crc32(data);
+    const local = new Uint8Array(30 + nameBytes.length + data.length);
+    const localView = new DataView(local.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint32(14, crc, true);
+    localView.setUint32(18, data.length, true);
+    localView.setUint32(22, data.length, true);
+    localView.setUint16(26, nameBytes.length, true);
+    local.set(nameBytes, 30);
+    local.set(data, 30 + nameBytes.length);
+    locals.push(local);
+
+    const central = new Uint8Array(46 + nameBytes.length);
+    const centralView = new DataView(central.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint32(16, crc, true);
+    centralView.setUint32(20, data.length, true);
+    centralView.setUint32(24, data.length, true);
+    centralView.setUint16(28, nameBytes.length, true);
+    centralView.setUint32(42, localOffset, true);
+    central.set(nameBytes, 46);
+    centrals.push(central);
+
+    localOffset += local.length;
+  }
+
+  const centralSize = centrals.reduce((sum, part) => sum + part.length, 0);
+  const eocd = new Uint8Array(22);
+  const eocdView = new DataView(eocd.buffer);
+  eocdView.setUint32(0, 0x06054b50, true);
+  eocdView.setUint16(8, locals.length, true);
+  eocdView.setUint16(10, locals.length, true);
+  eocdView.setUint32(12, centralSize, true);
+  eocdView.setUint32(16, localOffset, true);
+
+  const zip = new Uint8Array(localOffset + centralSize + eocd.length);
+  let offset = 0;
+  for (const part of [...locals, ...centrals, eocd]) {
+    zip.set(part, offset);
+    offset += part.length;
+  }
+  return zip;
 }
 
 const cyrillic = /[\u0400-\u04FF]/;
@@ -202,6 +338,15 @@ export function createFakeModelAdapter(): ModelAdapter {
           ...skillSpec.antiGoals.map((antiGoal) => `- ${antiGoal}`),
         ].join("\n"),
       };
+    },
+    async generateEvalCases({ skillSpec }) {
+      return [
+        {
+          scenario: `Hidden: work that matches this Skill is about to skip a hard rule. ${skillSpec.when}`,
+          must: skillSpec.invariants,
+          mustNot: skillSpec.antiGoals,
+        },
+      ];
     },
   };
 }

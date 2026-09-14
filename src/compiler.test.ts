@@ -9,6 +9,9 @@ const explodingAdapter: ModelAdapter = {
   generateCanon: async () => {
     throw new Error("model adapter must not be called");
   },
+  generateEvalCases: async () => {
+    throw new Error("model adapter must not be called");
+  },
 };
 
 const prReviewSkillSpec = {
@@ -23,10 +26,19 @@ const prReviewCanon = {
   body: "Require tests before approving.",
 };
 
+const prReviewEvalCases = [
+  {
+    scenario: "A reviewer is about to approve a pull request with no tests",
+    must: ["Ask for tests before approving"],
+    mustNot: ["Rewrite files the pull request did not touch"],
+  },
+];
+
 function compilePrReview(canon: unknown = prReviewCanon) {
   const adapter: ModelAdapter = {
     generateSkillSpec: async () => prReviewSkillSpec,
     generateCanon: async () => canon,
+    generateEvalCases: async () => prReviewEvalCases,
   };
   return compile(
     "A skill that reviews pull requests for missing tests.",
@@ -130,6 +142,58 @@ Require tests before approving.
 `);
 });
 
+test("Bundle contains Cursor and Claude Code Projections with identical Canon bytes", async () => {
+  const result = await compilePrReview();
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected compile to return a Bundle");
+  }
+
+  const expectedCanon = `---
+name: pr-review
+description: "Reviews pull requests for missing tests."
+---
+
+Require tests before approving.
+`;
+  expect(result.bundle.files["cursor/pr-review/SKILL.md"]).toBe(expectedCanon);
+  expect(result.bundle.files["claude/pr-review/SKILL.md"]).toBe(expectedCanon);
+});
+
+test("Bundle INSTALL.md says where to copy each Projection", async () => {
+  const result = await compilePrReview();
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected compile to return a Bundle");
+  }
+  expect(result.bundle.files["INSTALL.md"]).toBe(`# Install
+
+This Bundle has two Projections of the same Canon. Copy the folder for your runtime; path is the only difference.
+
+## Cursor
+
+Copy \`cursor/pr-review/\` to \`.cursor/skills/pr-review/\` in your project, or to \`~/.cursor/skills/pr-review/\` for every project.
+
+## Claude Code
+
+Copy \`claude/pr-review/\` to \`.claude/skills/pr-review/\` in your project, or to \`~/.claude/skills/pr-review/\` for every project.
+`);
+});
+
+test("Bundle evals/cases.json uses Eval Cases produced with the Skill Spec", async () => {
+  const result = await compilePrReview();
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected compile to return a Bundle");
+  }
+  expect(JSON.parse(result.bundle.files["evals/cases.json"])).toEqual(
+    prReviewEvalCases,
+  );
+});
+
 test("compile returns a Compatibility Report for Cursor vs Claude Code", async () => {
   const result = await compilePrReview();
 
@@ -187,6 +251,11 @@ test("malformed Skill Spec surfaces as an error", async () => {
     generateCanon: async () => {
       throw new Error("generateCanon must not run after a malformed Skill Spec");
     },
+    generateEvalCases: async () => {
+      throw new Error(
+        "generateEvalCases must not run after a malformed Skill Spec",
+      );
+    },
   };
 
   const result = await compile(
@@ -209,6 +278,25 @@ test("malformed Canon surfaces as an error", async () => {
   expect(result.ok).toBe(false);
   if (result.ok) {
     throw new Error("expected compile to reject a malformed Canon");
+  }
+  expect(result.message).toMatch(/malformed/i);
+});
+
+test("malformed Eval Cases surface as an error", async () => {
+  const adapter: ModelAdapter = {
+    generateSkillSpec: async () => prReviewSkillSpec,
+    generateCanon: async () => prReviewCanon,
+    generateEvalCases: async () => [{ scenario: "A PR has no tests" }],
+  };
+
+  const result = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    adapter,
+  );
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    throw new Error("expected compile to reject malformed Eval Cases");
   }
   expect(result.message).toMatch(/malformed/i);
 });
