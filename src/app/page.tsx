@@ -11,9 +11,9 @@ export default function Home() {
           <h1 className="font-[family-name:var(--font-source-serif)] text-4xl leading-tight text-[var(--ink)] sm:text-5xl">
             Skillcanon
           </h1>
-          <p className="max-w-xl text-base leading-7 text-[var(--ink-soft)]">
-            Type a Description. Compile a Skill Spec — when it applies,
-            invariants, and anti-goals — in the same language you wrote.
+          <p className="max-w-2xl text-base leading-7 text-[var(--ink-soft)]">
+            Type a Description. Compile a Skill Spec, then preview the portable
+            Canon and a Compatibility Report for Cursor vs Claude Code.
           </p>
         </div>
       </header>
