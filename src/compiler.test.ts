@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { compile, createFakeModelAdapter } from "@/compiler";
+import { compile, createFakeModelAdapter, zipBundle } from "@/compiler";
 import type { ModelAdapter, SkillSpec } from "@/compiler";
 
 const explodingAdapter: ModelAdapter = {
@@ -33,6 +33,27 @@ const prReviewEvalCases = [
     mustNot: ["Rewrite files the pull request did not touch"],
   },
 ];
+
+const prReviewCanonMarkdown = `---
+name: pr-review
+description: "Reviews pull requests for missing tests."
+---
+
+Require tests before approving.
+`;
+
+const prReviewInstallMarkdown = `# Install
+
+This Bundle has two Projections of the same Canon. Copy the folder for your runtime; path is the only difference.
+
+## Cursor
+
+Copy \`cursor/pr-review/\` to \`.cursor/skills/pr-review/\` in your project, or to \`~/.cursor/skills/pr-review/\` for every project.
+
+## Claude Code
+
+Copy \`claude/pr-review/\` to \`.claude/skills/pr-review/\` in your project, or to \`~/.claude/skills/pr-review/\` for every project.
+`;
 
 function compilePrReview(canon: unknown = prReviewCanon) {
   const adapter: ModelAdapter = {
@@ -113,13 +134,7 @@ test("compile returns a Canon whose frontmatter includes name and description", 
     name: "pr-review",
     folderName: "pr-review",
     description: "Reviews pull requests for missing tests.",
-    markdown: `---
-name: pr-review
-description: "Reviews pull requests for missing tests."
----
-
-Require tests before approving.
-`,
+    markdown: prReviewCanonMarkdown,
   });
 });
 
@@ -150,15 +165,12 @@ test("Bundle contains Cursor and Claude Code Projections with identical Canon by
     throw new Error("expected compile to return a Bundle");
   }
 
-  const expectedCanon = `---
-name: pr-review
-description: "Reviews pull requests for missing tests."
----
-
-Require tests before approving.
-`;
-  expect(result.bundle.files["cursor/pr-review/SKILL.md"]).toBe(expectedCanon);
-  expect(result.bundle.files["claude/pr-review/SKILL.md"]).toBe(expectedCanon);
+  expect(result.bundle.files["cursor/pr-review/SKILL.md"]).toBe(
+    prReviewCanonMarkdown,
+  );
+  expect(result.bundle.files["claude/pr-review/SKILL.md"]).toBe(
+    prReviewCanonMarkdown,
+  );
 });
 
 test("Bundle INSTALL.md says where to copy each Projection", async () => {
@@ -168,31 +180,95 @@ test("Bundle INSTALL.md says where to copy each Projection", async () => {
   if (!result.ok) {
     throw new Error("expected compile to return a Bundle");
   }
-  expect(result.bundle.files["INSTALL.md"]).toBe(`# Install
-
-This Bundle has two Projections of the same Canon. Copy the folder for your runtime; path is the only difference.
-
-## Cursor
-
-Copy \`cursor/pr-review/\` to \`.cursor/skills/pr-review/\` in your project, or to \`~/.cursor/skills/pr-review/\` for every project.
-
-## Claude Code
-
-Copy \`claude/pr-review/\` to \`.claude/skills/pr-review/\` in your project, or to \`~/.claude/skills/pr-review/\` for every project.
-`);
+  expect(result.bundle.files["INSTALL.md"]).toBe(prReviewInstallMarkdown);
 });
 
 test("Bundle evals/cases.json uses Eval Cases produced with the Skill Spec", async () => {
+  let receivedSkillSpec: SkillSpec | undefined;
+  const adapter: ModelAdapter = {
+    generateSkillSpec: async () => prReviewSkillSpec,
+    generateCanon: async () => prReviewCanon,
+    generateEvalCases: async ({ skillSpec }) => {
+      receivedSkillSpec = skillSpec;
+      return prReviewEvalCases;
+    },
+  };
+
+  const result = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    adapter,
+  );
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected compile to return a Bundle");
+  }
+  expect(receivedSkillSpec).toEqual(prReviewSkillSpec);
+  expect(JSON.parse(result.bundle.files["evals/cases.json"])).toEqual(
+    prReviewEvalCases,
+  );
+});
+
+test("zipBundle zip contains Cursor and Claude Code Projections, INSTALL.md, and evals/cases.json", async () => {
   const result = await compilePrReview();
 
   expect(result.ok).toBe(true);
   if (!result.ok) {
     throw new Error("expected compile to return a Bundle");
   }
-  expect(JSON.parse(result.bundle.files["evals/cases.json"])).toEqual(
-    prReviewEvalCases,
-  );
+
+  const files = readStoredZip(zipBundle(result.bundle));
+  expect(files["cursor/pr-review/SKILL.md"]).toBe(prReviewCanonMarkdown);
+  expect(files["claude/pr-review/SKILL.md"]).toBe(prReviewCanonMarkdown);
+  expect(files["INSTALL.md"]).toBe(prReviewInstallMarkdown);
+  expect(JSON.parse(files["evals/cases.json"])).toEqual(prReviewEvalCases);
 });
+
+function readStoredZip(zip: Uint8Array): Record<string, string> {
+  const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  const decoder = new TextDecoder();
+  const eocdOffset = zip.byteLength - 22;
+  if (view.getUint32(eocdOffset, true) !== 0x06054b50) {
+    throw new Error("missing ZIP end of central directory");
+  }
+
+  const entryCount = view.getUint16(eocdOffset + 10, true);
+  const centralSize = view.getUint32(eocdOffset + 12, true);
+  const centralOffset = view.getUint32(eocdOffset + 16, true);
+  const files: Record<string, string> = {};
+  let offset = centralOffset;
+
+  for (let index = 0; index < entryCount; index += 1) {
+    if (view.getUint32(offset, true) !== 0x02014b50) {
+      throw new Error("missing ZIP central directory entry");
+    }
+
+    const compression = view.getUint16(offset + 10, true);
+    const size = view.getUint32(offset + 24, true);
+    const nameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+    const name = decoder.decode(
+      zip.subarray(offset + 46, offset + 46 + nameLength),
+    );
+    if (compression !== 0) {
+      throw new Error(`unsupported ZIP compression for ${name}`);
+    }
+
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    files[name] = decoder.decode(zip.subarray(dataStart, dataStart + size));
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+
+  if (offset !== centralOffset + centralSize) {
+    throw new Error("ZIP central directory size mismatch");
+  }
+
+  return files;
+}
 
 test("compile returns a Compatibility Report for Cursor vs Claude Code", async () => {
   const result = await compilePrReview();

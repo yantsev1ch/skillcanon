@@ -38,11 +38,7 @@ export type CompatibilityReport = {
   fields: CompatibilityField[];
 };
 
-export type EvalCase = {
-  scenario: string;
-  must: string[];
-  mustNot: string[];
-};
+export type EvalCase = z.infer<typeof evalCaseSchema>;
 
 export type Bundle = {
   files: Record<string, string>;
@@ -123,17 +119,15 @@ const canonSchema = z
   })
   .strict();
 
-const evalCasesSchema = z
-  .array(
-    z
-      .object({
-        scenario: z.string().min(1),
-        must: z.array(z.string().min(1)).min(1),
-        mustNot: z.array(z.string().min(1)).min(1),
-      })
-      .strict(),
-  )
-  .min(1);
+const evalCaseSchema = z
+  .object({
+    scenario: z.string().min(1),
+    must: z.array(z.string().min(1)).min(1),
+    mustNot: z.array(z.string().min(1)).min(1),
+  })
+  .strict();
+
+const evalCasesSchema = z.array(evalCaseSchema).min(1);
 
 export async function compile(
   description: string,
