@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# next
+.next/
+out/
+
+# env and secrets
+.env
+.env.*
+!.env.example
+
+# os / ide
+.DS_Store
+.idea/
+.vscode/
+
+# test / coverage
+coverage/
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
