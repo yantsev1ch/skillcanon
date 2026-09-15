@@ -13,6 +13,7 @@
   --error: #9b2c2c;
   --error-bg: #f8ecec;
   --error-border: #e3c1c1;
+  --warn: #8a5a12;
   --background: var(--paper);
   --foreground: var(--ink);
 }

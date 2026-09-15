@@ -1,16 +1,15 @@
 "use client";
 
 import { useActionState, useState } from "react";
-import { compileDescription } from "./actions";
+import { compileDescription, type StudioResult } from "./actions";
 import {
-  check,
   examples,
   zipBundle,
   type Bundle,
   type Canon,
   type CheckResult,
   type CompatibilityReport,
-  type CompileResult,
+  type JudgeVerdict,
   type SkillSpec,
 } from "@/compiler";
 
@@ -18,7 +17,7 @@ export function Studio() {
   const [description, setDescription] = useState("");
   const [result, action, pending] = useActionState(
     compileDescription,
-    null as CompileResult | null,
+    null as StudioResult | null,
   );
   const error = result !== null && !result.ok ? result.message : null;
 
@@ -112,7 +111,7 @@ export function Studio() {
         />
       ) : null}
       {result?.ok ? (
-        <CheckView checkResult={check(result.canon, result.bundle)} />
+        <CheckView checkResult={result.check} />
       ) : null}
     </div>
   );
@@ -306,6 +305,11 @@ function CheckView({ checkResult }: { checkResult: CheckResult }) {
       >
         Check
       </h2>
+      {checkResult.model ? (
+        <p className="mt-2 font-mono text-sm text-[var(--ink-soft)]">
+          Model: {checkResult.model}
+        </p>
+      ) : null}
       <section className="mt-6" aria-labelledby="lint-heading">
         <h3
           id="lint-heading"
@@ -325,14 +329,66 @@ function CheckView({ checkResult }: { checkResult: CheckResult }) {
           </ul>
         )}
       </section>
-      <p
-        role="status"
-        className="mt-6 rounded-md border border-[var(--rule)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink-soft)]"
-      >
-        Judge {checkResult.judge.status}
-      </p>
+      <section className="mt-6" aria-labelledby="judge-heading">
+        <h3
+          id="judge-heading"
+          className="text-xs font-medium tracking-[0.14em] text-[var(--ink-soft)] uppercase"
+        >
+          Judge
+        </h3>
+        {checkResult.judge.status === "unavailable" ? (
+          <p
+            role="status"
+            className="mt-2 rounded-md border border-[var(--rule)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink-soft)]"
+          >
+            Judge unavailable
+          </p>
+        ) : (
+          <ul className="mt-4 grid gap-3">
+            {checkResult.judge.cases.map((judgeCase, index) => (
+              <li
+                key={index}
+                className="rounded-md border border-[var(--rule)] bg-[var(--paper)] px-4 py-3"
+              >
+                <div className="flex items-start gap-2">
+                  <JudgeVerdictBadge verdict={judgeCase.verdict} />
+                  <p className="text-sm leading-6 text-[var(--ink)]">
+                    {judgeCase.scenario}
+                  </p>
+                </div>
+                <p className="mt-2 text-sm leading-6 text-[var(--ink-soft)]">
+                  {judgeCase.comment}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </article>
   );
+}
+
+const judgeVerdictStyles = {
+  pass: {
+    className:
+      "inline-flex rounded-full bg-[var(--pine)]/10 px-2 py-0.5 text-xs font-medium tracking-wide text-[var(--pine)] uppercase",
+    label: "Pass",
+  },
+  warn: {
+    className:
+      "inline-flex rounded-full bg-[var(--warn)]/10 px-2 py-0.5 text-xs font-medium tracking-wide text-[var(--warn)] uppercase",
+    label: "Warn",
+  },
+  fail: {
+    className:
+      "inline-flex rounded-full bg-[var(--error)]/10 px-2 py-0.5 text-xs font-medium tracking-wide text-[var(--error)] uppercase",
+    label: "Fail",
+  },
+} as const;
+
+function JudgeVerdictBadge({ verdict }: { verdict: JudgeVerdict }) {
+  const { className, label } = judgeVerdictStyles[verdict];
+  return <span className={className}>{label}</span>;
 }
 
 function downloadBundle(bundle: Bundle, folderName: string) {

@@ -436,6 +436,105 @@ test("Russian Description produces a Russian Skill Spec", async () => {
   }
 });
 
+function adapterWithJudge(
+  judgeEvalCases: ModelAdapter["judgeEvalCases"],
+  model?: string,
+): ModelAdapter {
+  return {
+    ...explodingAdapter,
+    model,
+    judgeEvalCases,
+  };
+}
+
+test("Check scores a returned Judge verdict per Eval Case as pass, warn, or fail with a short comment", async () => {
+  const evalCases = [
+    {
+      scenario: "A reviewer is about to approve a pull request with no tests",
+      must: ["Ask for tests before approving"],
+      mustNot: ["Rewrite files the pull request did not touch"],
+    },
+    {
+      scenario: "A reviewer is about to rewrite an unrelated formatter config",
+      must: ["Stay inside the pull request diff"],
+      mustNot: ["Rewrite files the pull request did not touch"],
+    },
+    {
+      scenario: "A reviewer is about to approve just to unblock the author",
+      must: ["Require tests for new behavior"],
+      mustNot: ["Approve just to unblock the author"],
+    },
+  ];
+  const adapter: ModelAdapter = {
+    generateSkillSpec: async () => prReviewSkillSpec,
+    generateCanon: async () => prReviewCanon,
+    generateEvalCases: async () => evalCases,
+  };
+  const compiled = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    adapter,
+  );
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = await check(
+    compiled.canon,
+    compiled.bundle,
+    adapterWithJudge(async () => [
+      { verdict: "pass", comment: "Canon asks for tests before approving." },
+      { verdict: "warn", comment: "Canon is vague about staying in the diff." },
+      { verdict: "fail", comment: "Canon never forbids approving to unblock." },
+    ]),
+  );
+
+  expect(result.lint.ok).toBe(true);
+  expect(result.judge).toEqual({
+    status: "available",
+    cases: [
+      {
+        scenario: evalCases[0].scenario,
+        verdict: "pass",
+        comment: "Canon asks for tests before approving.",
+      },
+      {
+        scenario: evalCases[1].scenario,
+        verdict: "warn",
+        comment: "Canon is vague about staying in the diff.",
+      },
+      {
+        scenario: evalCases[2].scenario,
+        verdict: "fail",
+        comment: "Canon never forbids approving to unblock.",
+      },
+    ],
+  });
+});
+
+test("Check shows the current model name", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = await check(
+    compiled.canon,
+    compiled.bundle,
+    adapterWithJudge(
+      async () => [
+        { verdict: "pass", comment: "Canon asks for tests before approving." },
+      ],
+      "demo-judge",
+    ),
+  );
+
+  expect(result.model).toBe("demo-judge");
+});
+
 test("Check shows Lint and Judge unavailable when the Judge cannot run", async () => {
   const compiled = await compilePrReview();
 
@@ -444,7 +543,68 @@ test("Check shows Lint and Judge unavailable when the Judge cannot run", async (
     throw new Error("expected compile to return a Canon and Bundle");
   }
 
-  const result = check(compiled.canon, compiled.bundle);
+  const result = await check(compiled.canon, compiled.bundle);
+
+  expect(result.lint.ok).toBe(true);
+  expect(result.lint.issues).toEqual([]);
+  expect(result.judge).toEqual({ status: "unavailable" });
+});
+
+test("Check leaves Lint in place when the adapter returns no Judge result", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = await check(
+    compiled.canon,
+    compiled.bundle,
+    adapterWithJudge(async () => undefined),
+  );
+
+  expect(result.lint.ok).toBe(true);
+  expect(result.lint.issues).toEqual([]);
+  expect(result.judge).toEqual({ status: "unavailable" });
+});
+
+test("Check leaves Lint in place when the Judge adapter throws", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = await check(
+    compiled.canon,
+    compiled.bundle,
+    adapterWithJudge(async () => {
+      throw new Error("429 quota");
+    }),
+  );
+
+  expect(result.lint.ok).toBe(true);
+  expect(result.lint.issues).toEqual([]);
+  expect(result.judge).toEqual({ status: "unavailable" });
+});
+
+test("Check leaves Lint in place when the adapter returns a malformed Judge result", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = await check(
+    compiled.canon,
+    compiled.bundle,
+    adapterWithJudge(async () => [
+      { verdict: "maybe", comment: "not a Judge verdict" },
+    ]),
+  );
 
   expect(result.lint.ok).toBe(true);
   expect(result.lint.issues).toEqual([]);
@@ -459,7 +619,7 @@ test("Lint fails when Canon frontmatter is missing name", async () => {
     throw new Error("expected compile to return a Canon and Bundle");
   }
 
-  const result = check(
+  const result = await check(
     {
       ...compiled.canon,
       markdown: compiled.canon.markdown.replace(/^name:.*\n/m, ""),
@@ -479,7 +639,7 @@ test("Lint fails when Canon frontmatter is missing description", async () => {
     throw new Error("expected compile to return a Canon and Bundle");
   }
 
-  const result = check(
+  const result = await check(
     {
       ...compiled.canon,
       markdown: compiled.canon.markdown.replace(/^description:.*\n/m, ""),
@@ -502,7 +662,7 @@ test("Lint fails when Canon name does not match the Skill folder", async () => {
   }
 
   const folderName = "other-skill";
-  const result = check(
+  const result = await check(
     { ...compiled.canon, folderName },
     {
       files: {
@@ -528,7 +688,7 @@ test("Lint fails when the Canon uses non-portable fields", async () => {
     throw new Error("expected compile to return a Canon and Bundle");
   }
 
-  const result = check(
+  const result = await check(
     {
       ...compiled.canon,
       markdown: compiled.canon.markdown.replace(
@@ -555,7 +715,7 @@ test("Lint fails when the Bundle is missing a Cursor Projection", async () => {
 
   const files = { ...compiled.bundle.files };
   delete files[`cursor/${compiled.canon.folderName}/SKILL.md`];
-  const result = check(compiled.canon, { files });
+  const result = await check(compiled.canon, { files });
 
   expect(result.lint.ok).toBe(false);
   expect(result.lint.issues).toContain(
@@ -573,7 +733,7 @@ test("Lint fails when the Bundle is missing a Claude Code Projection", async () 
 
   const files = { ...compiled.bundle.files };
   delete files[`claude/${compiled.canon.folderName}/SKILL.md`];
-  const result = check(compiled.canon, { files });
+  const result = await check(compiled.canon, { files });
 
   expect(result.lint.ok).toBe(false);
   expect(result.lint.issues).toContain(
@@ -591,7 +751,7 @@ test("Lint fails when the Bundle is missing INSTALL.md", async () => {
 
   const files = { ...compiled.bundle.files };
   delete files["INSTALL.md"];
-  const result = check(compiled.canon, { files });
+  const result = await check(compiled.canon, { files });
 
   expect(result.lint.ok).toBe(false);
   expect(result.lint.issues).toContain("Bundle is missing INSTALL.md.");
@@ -607,7 +767,7 @@ test("Lint fails when the Bundle is missing evals/cases.json", async () => {
 
   const files = { ...compiled.bundle.files };
   delete files["evals/cases.json"];
-  const result = check(compiled.canon, { files });
+  const result = await check(compiled.canon, { files });
 
   expect(result.lint.ok).toBe(false);
   expect(result.lint.issues).toContain("Bundle is missing evals/cases.json.");
@@ -630,7 +790,8 @@ test("each Example has a Description a Visitor can edit before compile", () => {
 
 test("walking an Example reaches Skill Spec, Canon, Bundle, and Check", async () => {
   for (const example of examples) {
-    const result = await compile(example.description, createFakeModelAdapter());
+    const adapter = createFakeModelAdapter();
+    const result = await compile(example.description, adapter);
 
     expect(result.ok).toBe(true);
     if (!result.ok) {
@@ -649,8 +810,10 @@ test("walking an Example reaches Skill Spec, Canon, Bundle, and Check", async ()
     expect(result.bundle.files["INSTALL.md"]).toBeTruthy();
     expect(result.bundle.files["evals/cases.json"]).toBeTruthy();
 
-    const checkResult = check(result.canon, result.bundle);
+    const checkResult = await check(result.canon, result.bundle, adapter);
     expect(checkResult.lint.ok).toBe(true);
+    expect(checkResult.model).toBe("fake");
+    expect(checkResult.judge.status).toBe("available");
   }
 });
 

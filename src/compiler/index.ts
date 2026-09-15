@@ -6,6 +6,7 @@ export type Example = {
 };
 
 export type ModelAdapter = {
+  model?: string;
   generateSkillSpec: (description: string) => Promise<unknown>;
   generateCanon: (input: {
     description: string;
@@ -14,6 +15,10 @@ export type ModelAdapter = {
   generateEvalCases: (input: {
     description: string;
     skillSpec: SkillSpec;
+  }) => Promise<unknown>;
+  judgeEvalCases?: (input: {
+    canon: Canon;
+    evalCases: EvalCase[];
   }) => Promise<unknown>;
 };
 
@@ -54,13 +59,22 @@ export type Lint = {
   issues: string[];
 };
 
-export type Judge = {
-  status: "unavailable";
+export type JudgeVerdict = "pass" | "warn" | "fail";
+
+export type JudgeCase = {
+  scenario: string;
+  verdict: JudgeVerdict;
+  comment: string;
 };
+
+export type Judge =
+  | { status: "unavailable" }
+  | { status: "available"; cases: JudgeCase[] };
 
 export type CheckResult = {
   lint: Lint;
   judge: Judge;
+  model?: string;
 };
 
 export type CompileResult =
@@ -74,11 +88,65 @@ export type CompileResult =
     }
   | { ok: false; message: string };
 
-export function check(canon: Canon, bundle: Bundle): CheckResult {
+export async function check(
+  canon: Canon,
+  bundle: Bundle,
+  adapter?: ModelAdapter,
+): Promise<CheckResult> {
   return {
     lint: lint(canon, bundle),
-    judge: { status: "unavailable" },
+    judge: await judge(canon, bundle, adapter),
+    model: adapter?.model,
   };
+}
+
+async function judge(
+  canon: Canon,
+  bundle: Bundle,
+  adapter?: ModelAdapter,
+): Promise<Judge> {
+  if (!adapter?.judgeEvalCases) {
+    return { status: "unavailable" };
+  }
+
+  const evalCases = parseBundleEvalCases(bundle);
+  if (!evalCases) {
+    return { status: "unavailable" };
+  }
+
+  try {
+    const parsed = z
+      .array(judgeCaseResultSchema)
+      .safeParse(await adapter.judgeEvalCases({ canon, evalCases }));
+    if (!parsed.success || parsed.data.length !== evalCases.length) {
+      return { status: "unavailable" };
+    }
+
+    return {
+      status: "available",
+      cases: parsed.data.map((result, index) => ({
+        scenario: evalCases[index].scenario,
+        verdict: result.verdict,
+        comment: result.comment,
+      })),
+    };
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+function parseBundleEvalCases(bundle: Bundle): EvalCase[] | undefined {
+  const raw = bundle.files["evals/cases.json"];
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    const parsed = evalCasesSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function lint(canon: Canon, bundle: Bundle): Lint {
@@ -216,6 +284,13 @@ const evalCaseSchema = z
   .strict();
 
 const evalCasesSchema = z.array(evalCaseSchema).min(1);
+
+const judgeCaseResultSchema = z
+  .object({
+    verdict: z.enum(["pass", "warn", "fail"]),
+    comment: z.string().min(1),
+  })
+  .strict();
 
 const bakedExamples = [
   {
@@ -505,6 +580,7 @@ const cyrillic = /[\u0400-\u04FF]/;
 
 export function createFakeModelAdapter(): ModelAdapter {
   return {
+    model: "fake",
     async generateSkillSpec(description: string) {
       if (cyrillic.test(description)) {
         return {
@@ -548,6 +624,12 @@ export function createFakeModelAdapter(): ModelAdapter {
           mustNot: skillSpec.antiGoals,
         },
       ];
+    },
+    async judgeEvalCases({ evalCases }) {
+      return evalCases.map((evalCase) => ({
+        verdict: "pass",
+        comment: `Canon covers: ${evalCase.must[0]}`,
+      }));
     },
   };
 }
