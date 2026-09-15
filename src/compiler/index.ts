@@ -1,5 +1,10 @@
 import * as z from "zod";
 
+export type Example = {
+  title: string;
+  description: string;
+};
+
 export type ModelAdapter = {
   generateSkillSpec: (description: string) => Promise<unknown>;
   generateCanon: (input: {
@@ -212,6 +217,120 @@ const evalCaseSchema = z
 
 const evalCasesSchema = z.array(evalCaseSchema).min(1);
 
+const bakedExamples = [
+  {
+    title: "PR review",
+    description:
+      "Review a pull request before it is merged. Require tests for new behavior. Point at missing coverage and risky diffs. Do not rewrite files the pull request did not touch, and do not approve just to unblock the author.",
+    skillSpec: {
+      when: "When reviewing a pull request before it is merged",
+      invariants: [
+        "Require tests for new behavior before approving",
+        "Point at missing coverage and risky diffs",
+      ],
+      antiGoals: [
+        "Do not rewrite files the pull request did not touch",
+        "Do not approve just to unblock the author",
+      ],
+    },
+    evalCases: [
+      {
+        scenario:
+          "A reviewer is about to approve a pull request that adds an API with no tests",
+        must: ["Ask for tests covering the new behavior before approving"],
+        mustNot: ["Approve the pull request as-is"],
+      },
+      {
+        scenario:
+          "A reviewer is about to rewrite a formatter config the pull request did not touch",
+        must: ["Stay inside the pull request diff"],
+        mustNot: ["Rewrite files the pull request did not touch"],
+      },
+    ],
+  },
+  {
+    title: "DB migration",
+    description:
+      "Write or review a database migration. Use expand/contract so old and new code can run together. Do not drop columns or tables until readers are gone. Do not rewrite the history of migrations that already ran.",
+    skillSpec: {
+      when: "When writing or reviewing a database migration",
+      invariants: [
+        "Use expand/contract so old and new code can run together",
+        "Do not drop columns or tables until readers are gone",
+      ],
+      antiGoals: [
+        "Do not rewrite the history of migrations that already ran",
+      ],
+    },
+    evalCases: [
+      {
+        scenario:
+          "A migration adds a required column without a default while old code is still running",
+        must: ["Use expand/contract so old and new code can run together"],
+        mustNot: ["Add a breaking column change in one step"],
+      },
+      {
+        scenario:
+          "A migration drops a column that production readers still query",
+        must: ["Keep the column until readers are gone"],
+        mustNot: ["Drop columns or tables recklessly"],
+      },
+    ],
+  },
+  {
+    title: "release notes",
+    description:
+      "Write release notes from the changelog or commit log. Every note should trace to an entry in the log. Do not invent features that are not in the log, and do not hide breaking changes.",
+    skillSpec: {
+      when: "When writing release notes from a changelog or commit log",
+      invariants: [
+        "Every note traces to an entry in the log",
+        "Call out breaking changes that are in the log",
+      ],
+      antiGoals: [
+        "Do not invent features that are not in the log",
+        "Do not hide breaking changes",
+      ],
+    },
+    evalCases: [
+      {
+        scenario: "The changelog lists a breaking API rename and a bug fix",
+        must: ["Mention the breaking API rename"],
+        mustNot: ["Hide the breaking change"],
+      },
+      {
+        scenario:
+          "The author wants the notes to mention a dashboard that is not in the log",
+        must: ["Keep notes aligned with the log"],
+        mustNot: ["Invent features that are not in the log"],
+      },
+    ],
+  },
+] satisfies readonly {
+  title: string;
+  description: string;
+  skillSpec: SkillSpec;
+  evalCases: EvalCase[];
+}[];
+
+export const examples: readonly Example[] = bakedExamples.map(
+  ({ title, description }) => ({ title, description }),
+);
+
+function exampleMatchingDescription(description: string) {
+  return bakedExamples.find((example) => example.description === description);
+}
+
+async function skillSpecFromAdapter(
+  description: string,
+  adapter: ModelAdapter,
+): Promise<SkillSpec | undefined> {
+  const parsed = skillSpecSchema.safeParse(
+    await adapter.generateSkillSpec(description),
+  );
+  return parsed.success ? parsed.data : undefined;
+}
+
 export async function compile(
   description: string,
   adapter: ModelAdapter,
@@ -224,16 +343,17 @@ export async function compile(
     };
   }
 
-  const output = await adapter.generateSkillSpec(trimmed);
-  const parsed = skillSpecSchema.safeParse(output);
-  if (!parsed.success) {
+  const matchingExample = exampleMatchingDescription(trimmed);
+  const skillSpec = matchingExample
+    ? matchingExample.skillSpec
+    : await skillSpecFromAdapter(trimmed, adapter);
+  if (!skillSpec) {
     return {
       ok: false,
       message: "The model returned a malformed Skill Spec.",
     };
   }
 
-  const skillSpec = parsed.data;
   const canonOutput = await adapter.generateCanon({
     description: trimmed,
     skillSpec,
@@ -255,10 +375,12 @@ description: ${yamlDoubleQuoted(canonDescription)}
 ${body}
 `;
 
-  const evalCasesOutput = await adapter.generateEvalCases({
-    description: trimmed,
-    skillSpec,
-  });
+  const evalCasesOutput =
+    matchingExample?.evalCases ??
+    (await adapter.generateEvalCases({
+      description: trimmed,
+      skillSpec,
+    }));
   const parsedEvalCases = evalCasesSchema.safeParse(evalCasesOutput);
   if (!parsedEvalCases.success) {
     return {

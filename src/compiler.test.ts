@@ -1,5 +1,11 @@
 import { expect, test } from "vitest";
-import { check, compile, createFakeModelAdapter, zipBundle } from "@/compiler";
+import {
+  check,
+  compile,
+  createFakeModelAdapter,
+  examples,
+  zipBundle,
+} from "@/compiler";
 import type { ModelAdapter, SkillSpec } from "@/compiler";
 
 const explodingAdapter: ModelAdapter = {
@@ -605,4 +611,157 @@ test("Lint fails when the Bundle is missing evals/cases.json", async () => {
 
   expect(result.lint.ok).toBe(false);
   expect(result.lint.issues).toContain("Bundle is missing evals/cases.json.");
+});
+
+test("studio offers exactly three Examples: PR review, DB migration, and release notes", () => {
+  expect(examples.map((example) => example.title)).toEqual([
+    "PR review",
+    "DB migration",
+    "release notes",
+  ]);
+});
+
+test("each Example has a Description a Visitor can edit before compile", () => {
+  expect(examples).toHaveLength(3);
+  for (const example of examples) {
+    expect(example.description.trim().length).toBeGreaterThan(0);
+  }
+});
+
+test("walking an Example reaches Skill Spec, Canon, Bundle, and Check", async () => {
+  for (const example of examples) {
+    const result = await compile(example.description, createFakeModelAdapter());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(`expected ${example.title} to compile`);
+    }
+    expect(result.skillSpec.when.length).toBeGreaterThan(0);
+    expect(result.skillSpec.invariants.length).toBeGreaterThan(0);
+    expect(result.skillSpec.antiGoals.length).toBeGreaterThan(0);
+    expect(result.canon.markdown).toContain("name:");
+    expect(result.bundle.files[`cursor/${result.canon.folderName}/SKILL.md`]).toBe(
+      result.canon.markdown,
+    );
+    expect(result.bundle.files[`claude/${result.canon.folderName}/SKILL.md`]).toBe(
+      result.canon.markdown,
+    );
+    expect(result.bundle.files["INSTALL.md"]).toBeTruthy();
+    expect(result.bundle.files["evals/cases.json"]).toBeTruthy();
+
+    const checkResult = check(result.canon, result.bundle);
+    expect(checkResult.lint.ok).toBe(true);
+  }
+});
+
+function exampleNamed(title: string) {
+  const example = examples.find((item) => item.title === title);
+  if (!example) {
+    throw new Error(`missing Example: ${title}`);
+  }
+  return example;
+}
+
+function mustNotPattern(title: string): RegExp {
+  if (title === "PR review") {
+    return /did not touch/i;
+  }
+  if (title === "DB migration") {
+    return /drop/i;
+  }
+  if (title === "release notes") {
+    return /invent/i;
+  }
+  throw new Error(`unexpected Example: ${title}`);
+}
+
+test("each Example ships Eval Cases that include at least one must-not case", async () => {
+  for (const example of examples) {
+    const result = await compile(example.description, createFakeModelAdapter());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(`expected ${example.title} to compile`);
+    }
+
+    const evalCases: Array<{ mustNot: string[] }> = JSON.parse(
+      result.bundle.files["evals/cases.json"],
+    );
+    const mustNots = evalCases.flatMap((evalCase) => evalCase.mustNot);
+    expect(mustNots.length).toBeGreaterThan(0);
+    expect(mustNots.join("\n")).toMatch(mustNotPattern(example.title));
+  }
+});
+
+test("DB migration Example Skill Spec keeps expand/contract and forbids reckless drops", async () => {
+  const result = await compile(
+    exampleNamed("DB migration").description,
+    createFakeModelAdapter(),
+  );
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected DB migration Example to compile");
+  }
+  expect(result.skillSpec.invariants.join("\n")).toMatch(/expand\/contract/i);
+  expect(result.skillSpec.invariants.join("\n")).toMatch(/drop/i);
+});
+
+test("release notes Example Skill Spec forbids inventing features not in the log", async () => {
+  const result = await compile(
+    exampleNamed("release notes").description,
+    createFakeModelAdapter(),
+  );
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected release notes Example to compile");
+  }
+  expect(result.skillSpec.antiGoals.join("\n")).toMatch(/invent/i);
+});
+
+test("edited Example Description compiles through the model adapter, not the Example seeds", async () => {
+  const example = exampleNamed("DB migration");
+
+  const adapter: ModelAdapter = {
+    generateSkillSpec: async () => ({
+      when: "When the edited Description applies",
+      invariants: ["Edited invariant"],
+      antiGoals: ["Edited anti-goal"],
+    }),
+    generateCanon: async () => ({
+      name: "edited-skill",
+      description: "Edited Description",
+      body: "Honor the edited contract.",
+    }),
+    generateEvalCases: async () => [
+      {
+        scenario: "Edited scenario",
+        must: ["Follow the edited Description"],
+        mustNot: ["Keep the Example seeds"],
+      },
+    ],
+  };
+
+  const result = await compile(
+    `${example.description} Also mention rollback.`,
+    adapter,
+  );
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected edited Example Description to compile");
+  }
+  expect(result.skillSpec).toEqual({
+    when: "When the edited Description applies",
+    invariants: ["Edited invariant"],
+    antiGoals: ["Edited anti-goal"],
+  });
+  expect(JSON.parse(result.bundle.files["evals/cases.json"])).toEqual([
+    {
+      scenario: "Edited scenario",
+      must: ["Follow the edited Description"],
+      mustNot: ["Keep the Example seeds"],
+    },
+  ]);
 });

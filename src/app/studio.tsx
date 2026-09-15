@@ -4,6 +4,7 @@ import { useActionState, useState } from "react";
 import { compileDescription } from "./actions";
 import {
   check,
+  examples,
   zipBundle,
   type Bundle,
   type Canon,
@@ -25,6 +26,31 @@ export function Studio() {
     <div className="mx-auto grid w-full max-w-6xl gap-8">
       <div className="grid gap-8 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] md:gap-12">
         <form action={action} className="flex flex-col gap-4">
+          <fieldset className="m-0 flex min-w-0 flex-col gap-2 border-0 p-0">
+            <legend className="text-sm font-medium tracking-wide text-[var(--ink-soft)] uppercase">
+              Examples
+            </legend>
+            <div className="flex flex-wrap gap-2">
+              {examples.map((example) => {
+                const selected = description === example.description;
+                return (
+                  <button
+                    key={example.title}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => setDescription(example.description)}
+                    className={
+                      selected
+                        ? "inline-flex h-9 items-center justify-center rounded-md bg-[var(--pine)] px-3 text-sm font-medium text-[var(--paper)]"
+                        : "inline-flex h-9 items-center justify-center rounded-md border border-[var(--rule)] bg-[var(--paper-raised)] px-3 text-sm font-medium text-[var(--ink)] hover:border-[var(--pine)] hover:text-[var(--pine)]"
+                    }
+                  >
+                    {example.title}
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
           <div className="flex flex-col gap-2">
             <label
               htmlFor="description"
@@ -66,8 +92,9 @@ export function Studio() {
         ) : (
           <aside className="rounded-md border border-dashed border-[var(--rule)] bg-[var(--paper-raised)]/50 px-6 py-8 text-[var(--ink-soft)]">
             <p className="text-sm leading-6">
-              Compile a Description to see the Skill Spec, then a Canon preview,
-              a Compatibility Report, a Bundle zip, and Check.
+              Pick an Example or compile a Description to see the Skill Spec,
+              then a Canon preview, a Compatibility Report, a Bundle zip, and
+              Check.
             </p>
           </aside>
         )}
