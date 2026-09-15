@@ -2,8 +2,11 @@ import { expect, test } from "vitest";
 import {
   check,
   compile,
+  createDailyQuota,
   createFakeModelAdapter,
+  createOpenAICompatibleAdapter,
   examples,
+  resolveModelAdapter,
   zipBundle,
 } from "@/compiler";
 import type { ModelAdapter, SkillSpec } from "@/compiler";
@@ -333,6 +336,31 @@ test("compile returns a Compatibility Report for Cursor vs Claude Code", async (
       },
     ],
   });
+});
+
+test("a quota or network failure while compiling surfaces as an error", async () => {
+  const adapter: ModelAdapter = {
+    generateSkillSpec: async () => {
+      throw new Error("429 quota");
+    },
+    generateCanon: async () => {
+      throw new Error("generateCanon must not run after a model failure");
+    },
+    generateEvalCases: async () => {
+      throw new Error("generateEvalCases must not run after a model failure");
+    },
+  };
+
+  const result = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    adapter,
+  );
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    throw new Error("expected compile to reject a quota or network failure");
+  }
+  expect(result.message).toMatch(/model|key/i);
 });
 
 test("malformed Skill Spec surfaces as an error", async () => {
@@ -927,4 +955,268 @@ test("edited Example Description compiles through the model adapter, not the Exa
       mustNot: ["Keep the Example seeds"],
     },
   ]);
+});
+
+function openaiChatResponse(payload: unknown): Response {
+  return new Response(
+    JSON.stringify({
+      id: "chatcmpl-test",
+      object: "chat.completion",
+      created: 0,
+      model: "demo-flash",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: JSON.stringify(payload) },
+          finish_reason: "stop",
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+test("compile through an OpenAI-compatible adapter uses baseURL, apiKey, and model", async () => {
+  const payloads = [
+    prReviewSkillSpec,
+    prReviewCanon,
+    prReviewEvalCases,
+  ];
+  const requests: Array<{ url: string; authorization: string; model: string }> =
+    [];
+  const adapter = createOpenAICompatibleAdapter({
+    baseURL: "https://models.example/v1",
+    apiKey: "server-key",
+    model: "demo-flash",
+    fetch: async (input, init) => {
+      const headers = new Headers(init?.headers);
+      requests.push({
+        url: String(input),
+        authorization: headers.get("authorization") ?? "",
+        model: JSON.parse(String(init?.body)).model,
+      });
+      const payload = payloads.shift();
+      if (payload === undefined) {
+        throw new Error("unexpected extra model request");
+      }
+      return openaiChatResponse(payload);
+    },
+  });
+
+  const result = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    adapter,
+  );
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected compile through the OpenAI-compatible adapter");
+  }
+  expect(result.skillSpec).toEqual(prReviewSkillSpec);
+  expect(result.canon.name).toBe("pr-review");
+  expect(JSON.parse(result.bundle.files["evals/cases.json"])).toEqual(
+    prReviewEvalCases,
+  );
+  expect(requests.length).toBeGreaterThan(0);
+  for (const request of requests) {
+    expect(request.url.startsWith("https://models.example/v1/")).toBe(true);
+    expect(request.authorization).toBe("Bearer server-key");
+    expect(request.model).toBe("demo-flash");
+  }
+});
+
+test("Check leaves Lint in place when the OpenAI-compatible adapter hits a quota response", async () => {
+  const compiled = await compilePrReview();
+
+  expect(compiled.ok).toBe(true);
+  if (!compiled.ok) {
+    throw new Error("expected compile to return a Canon and Bundle");
+  }
+
+  const result = await check(
+    compiled.canon,
+    compiled.bundle,
+    createOpenAICompatibleAdapter({
+      baseURL: "https://models.example/v1",
+      apiKey: "server-key",
+      model: "demo-flash",
+      fetch: async () =>
+        new Response("quota exceeded", {
+          status: 429,
+          headers: { "content-type": "text/plain" },
+        }),
+    }),
+  );
+
+  expect(result.lint.ok).toBe(true);
+  expect(result.lint.issues).toEqual([]);
+  expect(result.judge).toEqual({ status: "unavailable" });
+});
+
+function openaiCompatibleFetch(payloads: unknown[]) {
+  const requests: Array<{ url: string; authorization: string; model: string }> =
+    [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const headers = new Headers(init?.headers);
+    requests.push({
+      url: String(input),
+      authorization: headers.get("authorization") ?? "",
+      model: JSON.parse(String(init?.body)).model,
+    });
+    const payload = payloads.shift();
+    if (payload === undefined) {
+      throw new Error("unexpected extra model request");
+    }
+    return openaiChatResponse(payload);
+  };
+  return { fetch: fetchImpl, requests };
+}
+
+const openaiCompatibleConfig = {
+  baseURL: "https://models.example/v1",
+  apiKey: "server-key",
+  model: "demo-flash",
+} as const;
+
+test("a Visitor API key is used for that compile and does not consume the daily cap", async () => {
+  const quota = createDailyQuota(1);
+  const visitor = openaiCompatibleFetch([
+    prReviewSkillSpec,
+    prReviewCanon,
+    prReviewEvalCases,
+  ]);
+  const visitorAdapter = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    visitorApiKey: " visitor-key ",
+    quota,
+    fetch: visitor.fetch,
+  });
+
+  expect(visitorAdapter.ok).toBe(true);
+  if (!visitorAdapter.ok) {
+    throw new Error("expected a Visitor API key to resolve an adapter");
+  }
+
+  const visitorResult = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    visitorAdapter.adapter,
+  );
+  expect(visitorResult.ok).toBe(true);
+  expect(visitor.requests.map((request) => request.authorization)).toEqual(
+    visitor.requests.map(() => "Bearer visitor-key"),
+  );
+
+  const server = openaiCompatibleFetch([
+    prReviewSkillSpec,
+    prReviewCanon,
+    prReviewEvalCases,
+  ]);
+  const serverAdapter = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    quota,
+    fetch: server.fetch,
+  });
+  expect(serverAdapter.ok).toBe(true);
+  if (!serverAdapter.ok) {
+    throw new Error("expected the server key to still be under the daily cap");
+  }
+
+  const serverResult = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    serverAdapter.adapter,
+  );
+  expect(serverResult.ok).toBe(true);
+  expect(server.requests[0]?.authorization).toBe("Bearer server-key");
+});
+
+test("compile fails when the server key is over the daily cap and no Visitor API key is provided", async () => {
+  const quota = createDailyQuota(1);
+  const first = openaiCompatibleFetch([
+    prReviewSkillSpec,
+    prReviewCanon,
+    prReviewEvalCases,
+  ]);
+  const firstAdapter = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    quota,
+    fetch: first.fetch,
+  });
+  expect(firstAdapter.ok).toBe(true);
+  if (!firstAdapter.ok) {
+    throw new Error("expected the first server-key compile to resolve");
+  }
+  const firstResult = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    firstAdapter.adapter,
+  );
+  expect(firstResult.ok).toBe(true);
+
+  const capped = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    quota,
+    fetch: first.fetch,
+  });
+  expect(capped).toEqual({
+    ok: false,
+    message:
+      "The server key hit its daily cap. Paste your own API key to continue.",
+  });
+
+  const visitor = openaiCompatibleFetch([
+    prReviewSkillSpec,
+    prReviewCanon,
+    prReviewEvalCases,
+  ]);
+  const visitorAdapter = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    visitorApiKey: "visitor-key",
+    quota,
+    fetch: visitor.fetch,
+  });
+  expect(visitorAdapter.ok).toBe(true);
+  if (!visitorAdapter.ok) {
+    throw new Error("expected a Visitor API key to compile after the daily cap");
+  }
+  const visitorResult = await compile(
+    "A skill that reviews pull requests for missing tests.",
+    visitorAdapter.adapter,
+  );
+  expect(visitorResult.ok).toBe(true);
+});
+
+test("compile asks for a Visitor API key when the server key is missing", () => {
+  const resolved = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    apiKey: "  ",
+    quota: createDailyQuota(1),
+  });
+  expect(resolved).toEqual({
+    ok: false,
+    message: "Paste an API key to compile.",
+  });
+});
+
+test("the server daily cap resets on the next UTC day", () => {
+  const quota = createDailyQuota(1);
+  const first = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    quota,
+    now: new Date("2026-09-15T23:00:00.000Z"),
+  });
+  expect(first.ok).toBe(true);
+
+  const sameDay = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    quota,
+    now: new Date("2026-09-15T23:59:00.000Z"),
+  });
+  expect(sameDay.ok).toBe(false);
+
+  const nextDay = resolveModelAdapter({
+    ...openaiCompatibleConfig,
+    quota,
+    now: new Date("2026-09-16T00:00:00.000Z"),
+  });
+  expect(nextDay.ok).toBe(true);
 });

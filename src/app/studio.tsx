@@ -69,6 +69,23 @@ export function Studio() {
               className="min-h-40 w-full resize-y rounded-md border border-[var(--rule)] bg-[var(--paper-raised)] px-4 py-3 font-[family-name:var(--font-inter)] text-base leading-7 text-[var(--ink)] shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--pine)] focus:ring-2 focus:ring-[var(--pine-ring)]"
             />
           </div>
+          <div className="flex flex-col gap-2">
+            <label
+              htmlFor="visitorApiKey"
+              className="text-sm font-medium tracking-wide text-[var(--ink-soft)] uppercase"
+            >
+              API key (optional)
+            </label>
+            <input
+              id="visitorApiKey"
+              name="visitorApiKey"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="Used for this compile only. Never stored."
+              className="h-11 w-full rounded-md border border-[var(--rule)] bg-[var(--paper-raised)] px-4 font-[family-name:var(--font-inter)] text-base text-[var(--ink)] shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--pine)] focus:ring-2 focus:ring-[var(--pine-ring)]"
+            />
+          </div>
           {error ? (
             <p
               id="description-error"

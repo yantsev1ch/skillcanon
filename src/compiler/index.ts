@@ -418,6 +418,21 @@ export async function compile(
     };
   }
 
+  try {
+    return await compileWithAdapter(trimmed, adapter);
+  } catch {
+    return {
+      ok: false,
+      message:
+        "The model could not be reached. Try again, or paste your own API key.",
+    };
+  }
+}
+
+async function compileWithAdapter(
+  trimmed: string,
+  adapter: ModelAdapter,
+): Promise<CompileResult> {
   const matchingExample = exampleMatchingDescription(trimmed);
   const skillSpec = matchingExample
     ? matchingExample.skillSpec
@@ -633,3 +648,12 @@ export function createFakeModelAdapter(): ModelAdapter {
     },
   };
 }
+
+export {
+  createDailyQuota,
+  createOpenAICompatibleAdapter,
+  resolveModelAdapter,
+  type AdapterResolution,
+  type DailyQuota,
+  type OpenAICompatibleAdapterConfig,
+} from "./openai-compatible";
