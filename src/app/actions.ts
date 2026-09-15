@@ -33,9 +33,9 @@ export async function compileDescription(
   }
 
   const resolved = resolveModelAdapter({
-    baseURL: process.env.SKILLCANON_MODEL_BASE_URL ?? "",
-    apiKey: process.env.SKILLCANON_MODEL_API_KEY ?? "",
-    model: process.env.SKILLCANON_MODEL_ID ?? "",
+    baseURL: studioEnv("SKILLCANON_MODEL_BASE_URL"),
+    apiKey: studioEnv("SKILLCANON_MODEL_API_KEY"),
+    model: studioEnv("SKILLCANON_MODEL_ID"),
     visitorApiKey: String(formData.get("visitorApiKey") ?? ""),
     quota: serverKeyQuota,
   });
@@ -54,7 +54,11 @@ export async function compileDescription(
   };
 }
 
+function studioEnv(name: string): string {
+  return process.env[name]?.trim() ?? "";
+}
+
 function studioDailyCap(): number {
-  const parsed = Number(process.env.SKILLCANON_DAILY_CAP ?? 20);
+  const parsed = Number(studioEnv("SKILLCANON_DAILY_CAP") || "20");
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 20;
 }

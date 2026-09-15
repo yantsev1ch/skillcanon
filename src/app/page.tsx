@@ -1,5 +1,7 @@
 import { Studio } from "./studio";
 
+export const maxDuration = 120;
+
 export default function Home() {
   return (
     <div className="flex flex-1 flex-col">
