@@ -7,6 +7,7 @@ export type OpenAICompatibleAdapterConfig = {
   apiKey: string;
   model: string;
   fetch?: typeof fetch;
+  maxRetries?: number;
 };
 
 export type DailyQuota = {
@@ -89,19 +90,24 @@ export function createOpenAICompatibleAdapter(
     name: "skillcanon",
     baseURL: config.baseURL,
     apiKey: config.apiKey,
-    fetch: config.fetch,
+    fetch: wrapFetch(config.baseURL, config.fetch),
   });
   const model = provider.chatModel(config.model);
+  const maxRetries = config.maxRetries ?? 2;
 
   return {
     model: config.model,
     generateSkillSpec(description) {
       return generateJson(
         model,
-        `Produce a Skill Spec as JSON with keys when (string), invariants (string[]), and antiGoals (string[]). Each array needs at least one item. Write in the same language as the Description. Return JSON only.
+        `Return JSON only, no markdown. Keys: when (string), invariants (string[]), antiGoals (string[]). Each array has at least one short item. Same language as the Description.
+
+Example:
+{"when":"When the user asks to review a pull request","invariants":["Require tests for behavior changes"],"antiGoals":["Do not rewrite unrelated files"]}
 
 Description:
 ${description}`,
+        maxRetries,
       );
     },
     generateCanon({ description, skillSpec }) {
@@ -114,40 +120,158 @@ ${description}
 
 Skill Spec:
 ${JSON.stringify(skillSpec)}`,
+        maxRetries,
       );
     },
     generateEvalCases({ description, skillSpec }) {
       return generateJson(
         model,
-        `Produce Eval Cases as a JSON array of objects with keys scenario (string), must (string[]), and mustNot (string[]). Include at least one case. Write in the same language as the Description. Return JSON only.
+        `Return JSON only, no markdown. Shape: {"cases":[{ "scenario": string, "must": string[], "mustNot": string[] }]}. At least one case. Same language as the Description.
+
+Example:
+{"cases":[{"scenario":"A PR adds a feature with no tests","must":["Ask for tests"],"mustNot":["Rewrite unrelated files"]}]}
 
 Description:
 ${description}
 
 Skill Spec:
 ${JSON.stringify(skillSpec)}`,
-      );
+        maxRetries,
+      ).then(unwrapEvalCases);
     },
     judgeEvalCases({ canon, evalCases }) {
       return generateJson(
         model,
-        `Score each Eval Case against the Canon. Return a JSON array, in the same order, of objects with keys verdict ("pass", "warn", or "fail") and comment (a short string). Return JSON only.
+        `Return JSON only, no markdown. Shape: {"results":[{ "verdict": "pass"|"warn"|"fail", "comment": string }]}. Same order as Eval Cases.
+
+Example:
+{"results":[{"verdict":"pass","comment":"Canon requires tests for new behavior."}]}
 
 Canon:
 ${canon.markdown}
 
 Eval Cases:
 ${JSON.stringify(evalCases)}`,
-      );
+        maxRetries,
+      ).then(unwrapJudgeResults);
     },
   };
+}
+
+function wrapFetch(
+  baseURL: string,
+  inner: typeof fetch = fetch,
+): typeof fetch {
+  return async (input, init) => {
+    const headers = new Headers(init?.headers);
+    if (isNgrok(baseURL) || isNgrok(String(input))) {
+      headers.set("ngrok-skip-browser-warning", "1");
+    }
+
+    let body = init?.body;
+    if (typeof body === "string") {
+      try {
+        const payload = JSON.parse(body) as Record<string, unknown>;
+        if (payload.response_format == null) {
+          payload.response_format = { type: "json_object" };
+        }
+        if (payload.temperature == null) {
+          payload.temperature = 0.2;
+        }
+        body = JSON.stringify(payload);
+        headers.delete("content-length");
+      } catch {
+        // leave the original body
+      }
+    }
+
+    return inner(input, { ...init, headers, body });
+  };
+}
+
+function isNgrok(value: string): boolean {
+  return /ngrok/i.test(value);
+}
+
+function unwrapEvalCases(value: unknown): unknown {
+  const list = asList(value, ["cases", "evalCases", "evals"]);
+  if (list === undefined) {
+    return value;
+  }
+  return list.map(normalizeEvalCase);
+}
+
+function unwrapJudgeResults(value: unknown): unknown {
+  const list = asList(value, ["results", "scores", "cases"]);
+  if (list === undefined) {
+    return value;
+  }
+  return list.map(normalizeJudgeResult);
+}
+
+function asList(value: unknown, keys: string[]): unknown[] | undefined {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of keys) {
+      if (Array.isArray(record[key])) {
+        return record[key];
+      }
+    }
+    if ("scenario" in record || "verdict" in record) {
+      return [record];
+    }
+  }
+  return undefined;
+}
+
+function normalizeEvalCase(item: unknown): unknown {
+  if (item === null || typeof item !== "object") {
+    return item;
+  }
+  const record = item as Record<string, unknown>;
+  const must = record.must ?? record.should;
+  const mustNot = record.mustNot ?? record.must_not ?? record.mustnot;
+  return {
+    scenario: stringOrUndefined(record.scenario) ?? stringOrUndefined(record.name),
+    must: asStringList(must),
+    mustNot: asStringList(mustNot),
+  };
+}
+
+function normalizeJudgeResult(item: unknown): unknown {
+  if (item === null || typeof item !== "object") {
+    return item;
+  }
+  const record = item as Record<string, unknown>;
+  return {
+    verdict: record.verdict,
+    comment: stringOrUndefined(record.comment) ?? stringOrUndefined(record.reason),
+  };
+}
+
+function asStringList(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    return [value];
+  }
+  return value;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
 async function generateJson(
   model: Parameters<typeof generateText>[0]["model"],
   prompt: string,
+  maxRetries: number,
 ): Promise<unknown> {
-  const { text } = await generateText({ model, prompt, maxRetries: 0 });
+  const { text } = await generateText({ model, prompt, maxRetries });
   return parseJsonValue(text);
 }
 
@@ -156,9 +280,30 @@ function parseJsonValue(text: string): unknown {
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/, "");
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return text;
+  const candidates = [trimmed];
+  const objectSlice = sliceBetween(trimmed, "{", "}");
+  const arraySlice = sliceBetween(trimmed, "[", "]");
+  if (objectSlice !== undefined) {
+    candidates.push(objectSlice);
   }
+  if (arraySlice !== undefined) {
+    candidates.push(arraySlice);
+  }
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // try the next candidate
+    }
+  }
+  return text;
+}
+
+function sliceBetween(text: string, start: string, end: string): string | undefined {
+  const from = text.indexOf(start);
+  const to = text.lastIndexOf(end);
+  if (from === -1 || to === -1 || to <= from) {
+    return undefined;
+  }
+  return text.slice(from, to + 1);
 }

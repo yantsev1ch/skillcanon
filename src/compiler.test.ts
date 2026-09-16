@@ -958,6 +958,10 @@ test("edited Example Description compiles through the model adapter, not the Exa
 });
 
 function openaiChatResponse(payload: unknown): Response {
+  return openaiChatContent(JSON.stringify(payload));
+}
+
+function openaiChatContent(content: string): Response {
   return new Response(
     JSON.stringify({
       id: "chatcmpl-test",
@@ -967,7 +971,7 @@ function openaiChatResponse(payload: unknown): Response {
       choices: [
         {
           index: 0,
-          message: { role: "assistant", content: JSON.stringify(payload) },
+          message: { role: "assistant", content },
           finish_reason: "stop",
         },
       ],
@@ -976,6 +980,123 @@ function openaiChatResponse(payload: unknown): Response {
     { status: 200, headers: { "content-type": "application/json" } },
   );
 }
+
+function geminiUnavailableResponse(): Response {
+  return new Response(
+    JSON.stringify([
+      {
+        error: {
+          code: 503,
+          message:
+            "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+          status: "UNAVAILABLE",
+        },
+      },
+    ]),
+    {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
+test("OpenAI-compatible adapter skips the ngrok free interstitial", async () => {
+  const headers: string[] = [];
+  const adapter = createOpenAICompatibleAdapter({
+    baseURL: "https://demo.ngrok-free.dev/v1",
+    apiKey: "server-key",
+    model: "demo-flash",
+    fetch: async (_input, init) => {
+      headers.push(new Headers(init?.headers).get("ngrok-skip-browser-warning") ?? "");
+      return openaiChatResponse({
+        when: "When reviewing a PR",
+        invariants: ["Require tests"],
+        antiGoals: ["Do not rewrite the diff"],
+      });
+    },
+  });
+
+  await adapter.generateSkillSpec("A skill that reviews pull requests.");
+
+  expect(headers).toEqual(["1"]);
+});
+
+test("OpenAI-compatible adapter asks Ollama for JSON and lower temperature", async () => {
+  let body: { response_format?: { type?: string }; temperature?: number } = {};
+  const adapter = createOpenAICompatibleAdapter({
+    baseURL: "https://models.example/v1",
+    apiKey: "server-key",
+    model: "demo-flash",
+    fetch: async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return openaiChatResponse({
+        when: "When reviewing a PR",
+        invariants: ["Require tests"],
+        antiGoals: ["Do not rewrite the diff"],
+      });
+    },
+  });
+
+  await adapter.generateSkillSpec("A skill that reviews pull requests.");
+
+  expect(body.response_format).toEqual({ type: "json_object" });
+  expect(body.temperature).toBe(0.2);
+});
+
+test("OpenAI-compatible adapter extracts JSON from surrounding prose", async () => {
+  const adapter = createOpenAICompatibleAdapter({
+    baseURL: "https://models.example/v1",
+    apiKey: "server-key",
+    model: "demo-flash",
+    fetch: async () =>
+      openaiChatContent(
+        'Sure, here you go:\n{"when":"When reviewing a PR","invariants":["Require tests"],"antiGoals":["Do not rewrite the diff"]}\n',
+      ),
+  });
+
+  await expect(
+    adapter.generateSkillSpec("A skill that reviews pull requests."),
+  ).resolves.toEqual({
+    when: "When reviewing a PR",
+    invariants: ["Require tests"],
+    antiGoals: ["Do not rewrite the diff"],
+  });
+});
+
+test("OpenAI-compatible adapter unwraps Eval Cases from a JSON object", async () => {
+  const adapter = createOpenAICompatibleAdapter({
+    baseURL: "https://models.example/v1",
+    apiKey: "server-key",
+    model: "demo-flash",
+    fetch: async () =>
+      openaiChatResponse({
+        cases: [
+          {
+            scenario: "A PR adds a feature with no tests",
+            must: ["Ask for tests"],
+            must_not: ["Rewrite unrelated files"],
+          },
+        ],
+      }),
+  });
+
+  await expect(
+    adapter.generateEvalCases({
+      description: "A skill that reviews pull requests.",
+      skillSpec: {
+        when: "When reviewing a PR",
+        invariants: ["Require tests"],
+        antiGoals: ["Do not rewrite the diff"],
+      },
+    }),
+  ).resolves.toEqual([
+    {
+      scenario: "A PR adds a feature with no tests",
+      must: ["Ask for tests"],
+      mustNot: ["Rewrite unrelated files"],
+    },
+  ]);
+});
 
 test("compile through an OpenAI-compatible adapter uses baseURL, apiKey, and model", async () => {
   const payloads = [
@@ -1026,6 +1147,107 @@ test("compile through an OpenAI-compatible adapter uses baseURL, apiKey, and mod
   }
 });
 
+test(
+  "compile retries a transient 503 and succeeds",
+  async () => {
+    const payloads = [prReviewCanon];
+    let attempts = 0;
+    const adapter = createOpenAICompatibleAdapter({
+      baseURL: "https://models.example/v1",
+      apiKey: "server-key",
+      model: "demo-flash",
+      fetch: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return geminiUnavailableResponse();
+        }
+        const payload = payloads.shift();
+        if (payload === undefined) {
+          throw new Error("unexpected extra model request");
+        }
+        return openaiChatResponse(payload);
+      },
+    });
+
+    const result = await compile(exampleNamed("PR review").description, adapter);
+
+    expect(result.ok, result.ok ? "ok" : result.message).toBe(true);
+    expect(attempts).toBe(2);
+  },
+  15_000,
+);
+
+test("compile surfaces a busy message when the model returns 503", async () => {
+  const result = await compile(
+    exampleNamed("PR review").description,
+    createOpenAICompatibleAdapter({
+      baseURL: "https://models.example/v1",
+      apiKey: "server-key",
+      model: "demo-flash",
+      maxRetries: 0,
+      fetch: async () => geminiUnavailableResponse(),
+    }),
+  );
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    throw new Error("expected compile to reject a 503");
+  }
+  expect(result.message).toBe(
+    "The model is busy. Try again, or paste your own API key.",
+  );
+});
+
+test(
+  "compile still surfaces a busy message after 503 retries are exhausted",
+  async () => {
+    const result = await compile(
+      exampleNamed("PR review").description,
+      createOpenAICompatibleAdapter({
+        baseURL: "https://models.example/v1",
+        apiKey: "server-key",
+        model: "demo-flash",
+        maxRetries: 1,
+        fetch: async () => geminiUnavailableResponse(),
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("expected compile to reject a persistent 503");
+    }
+    expect(result.message).toBe(
+      "The model is busy. Try again, or paste your own API key.",
+    );
+  },
+  15_000,
+);
+
+test("compile surfaces a rate-limit message when the model returns 429", async () => {
+  const result = await compile(
+    exampleNamed("PR review").description,
+    createOpenAICompatibleAdapter({
+      baseURL: "https://models.example/v1",
+      apiKey: "server-key",
+      model: "demo-flash",
+      maxRetries: 0,
+      fetch: async () =>
+        new Response("quota exceeded", {
+          status: 429,
+          headers: { "content-type": "text/plain" },
+        }),
+    }),
+  );
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    throw new Error("expected compile to reject a 429");
+  }
+  expect(result.message).toBe(
+    "The model hit a rate limit. Try again, or paste your own API key.",
+  );
+});
+
 test("Check leaves Lint in place when the OpenAI-compatible adapter hits a quota response", async () => {
   const compiled = await compilePrReview();
 
@@ -1041,6 +1263,7 @@ test("Check leaves Lint in place when the OpenAI-compatible adapter hits a quota
       baseURL: "https://models.example/v1",
       apiKey: "server-key",
       model: "demo-flash",
+      maxRetries: 0,
       fetch: async () =>
         new Response("quota exceeded", {
           status: 429,

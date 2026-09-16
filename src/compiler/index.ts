@@ -420,13 +420,77 @@ export async function compile(
 
   try {
     return await compileWithAdapter(trimmed, adapter);
-  } catch {
+  } catch (error) {
     return {
       ok: false,
-      message:
-        "The model could not be reached. Try again, or paste your own API key.",
+      message: compileFailureMessage(error),
     };
   }
+}
+
+function compileFailureMessage(error: unknown): string {
+  for (const candidate of flattenErrors(error)) {
+    const statusCode = errorStatusCode(candidate);
+    const text = errorText(candidate);
+    if (
+      statusCode === 503 ||
+      /service unavailable|high demand|\bunavailable\b/i.test(text)
+    ) {
+      return "The model is busy. Try again, or paste your own API key.";
+    }
+    if (
+      statusCode === 429 ||
+      /too many requests|rate limit|quota exceeded|resource exhausted/i.test(
+        text,
+      )
+    ) {
+      return "The model hit a rate limit. Try again, or paste your own API key.";
+    }
+  }
+  return "The model could not be reached. Try again, or paste your own API key.";
+}
+
+function flattenErrors(error: unknown): unknown[] {
+  const seen = new Set<unknown>();
+  const queue = [error];
+  const flattened: unknown[] = [];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined || seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+    flattened.push(current);
+    if (typeof current !== "object" || current === null) {
+      continue;
+    }
+    if ("cause" in current) {
+      queue.push(current.cause);
+    }
+    if ("errors" in current && Array.isArray(current.errors)) {
+      queue.push(...current.errors);
+    }
+  }
+  return flattened;
+}
+
+function errorStatusCode(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("statusCode" in error)) {
+    return undefined;
+  }
+  const value = error.statusCode;
+  return typeof value === "number" ? value : undefined;
+}
+
+function errorText(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const body =
+    "responseBody" in error && typeof error.responseBody === "string"
+      ? error.responseBody
+      : "";
+  return `${error.message} ${body}`;
 }
 
 async function compileWithAdapter(
